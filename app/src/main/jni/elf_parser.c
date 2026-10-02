@@ -51,6 +51,11 @@ int find_hook_target(const char *libcxx, const char *symname,
         }
     }
 
+    if (executable_off == 0 && executable_vaddr == 0) {
+        REPORTLN("no executable PT_LOAD segment found in %s", libcxx);
+        close(fd); return 1;
+    }
+
     if (lseek64(fd, hdr.e_shoff + hdr.e_shstrndx * sizeof(Elf64_Shdr), SEEK_SET) < 0) {
         REPORTLN("lseek64 shstrndx failed: %s", strerror(errno));
         close(fd); return 1;
@@ -130,7 +135,7 @@ int find_hook_target(const char *libcxx, const char *symname,
     }
 
     if (*first_instruction == 0xd503233fU || *first_instruction == 0xd503245f) {
-        REPORTLN("PACIASP/BTI at hook site, advancing +4");
+        REPORTLN("PACIASP/BTI found at hook site, advancing +4");
         *hook_target += 4UL;
         if (read(fd, first_instruction, sizeof(*first_instruction)) < 0) {
             REPORTLN("read first instruction +4 failed: %s", strerror(errno));

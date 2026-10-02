@@ -4,11 +4,6 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-// Build with:
-// /home/brian/android/ide/sdk/ndk/30.0.16248370/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android30-clang \
-//   splicehelper.c -o splicehelper -nodefaultlibs -nostartfiles -ffreestanding -static && \
-// /home/brian/android/ide/sdk/ndk/30.0.16248370/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip splicehelper
-
 // argv[0] = program name
 // argv[1] = file offset (decimal string)
 // argv[2] = file path
@@ -62,12 +57,14 @@ void start_c(void *argblock) {
 
     if (mode && streq(mode, "r")) {
         /* Read mode: lseek to offset, read 16 bytes, write to OUT_FD */
-        /* Exit codes: 0=ok, 1=read<16, 2=write<16 */
+        /* Exit codes: 0=ok, 1=read<16, 2=write<16, 3=OUT_FD not a pipe (fd sanitized) */
         mysyscall3((unsigned long)file_fd, (unsigned long)off, SEEK_SET, __NR_lseek);
         unsigned char buf[16];
         long n = mysyscall3((unsigned long)file_fd, (unsigned long)buf, 16, __NR_read);
         if (n != 16)
             mysyscall1(1, __NR_exit_group);
+        if (mysyscall3(OUT_FD, 0, SEEK_CUR, __NR_lseek) != (long)-29L) /* ESPIPE: fd is a pipe */
+            mysyscall1(3, __NR_exit_group);
         long w = mysyscall3(OUT_FD, (unsigned long)buf, 16, __NR_write);
         mysyscall1((unsigned long)(w == 16 ? 0 : 2), __NR_exit_group);
     }

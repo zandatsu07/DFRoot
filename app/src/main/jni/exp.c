@@ -111,14 +111,22 @@ static int read_vendor_content(off_t offset, uint8_t buf[16], struct Reporter *r
         n = (int)TEMP_FAILURE_RETRY(read(rdpipe[0], buf, 16));
     close(rdpipe[0]);
     if (n != 16) {
-        if (WIFEXITED(status))
-            REPORTLN("read_vendor at 0x%lx got %d bytes (exit %d)",
-                     (long)offset, n, WEXITSTATUS(status));
-        else if (WIFSIGNALED(status))
-            REPORTLN("read_vendor at 0x%lx got %d bytes (signal %d)",
+        if (WIFEXITED(status)) {
+            static const char *const exit_meanings[] = {
+                [0] = "success",
+                [1] = "open vendor file failed or read returned < 16 bytes",
+                [2] = "write to pipe returned < 16 bytes",
+                [3] = "OUT_FD is not a pipe (fd sanitized by SELinux domain transition?)",
+            };
+            int ec = WEXITSTATUS(status);
+            const char *meaning = (ec < 4) ? exit_meanings[ec] : "unknown";
+            REPORTLN("read_vendor at 0x%lx got %d bytes: %s",
+                     (long)offset, n, meaning);
+        } else if (WIFSIGNALED(status))
+            REPORTLN("read_vendor at 0x%lx got %d bytes: signal %d",
                      (long)offset, n, WTERMSIG(status));
         else
-            REPORTLN("read_vendor at 0x%lx got %d bytes (status 0x%x)",
+            REPORTLN("read_vendor at 0x%lx got %d bytes: status 0x%x",
                      (long)offset, n, status);
         return -1;
     }
@@ -402,8 +410,24 @@ static int patch_ko(struct Reporter *reporter) {
     if (!sh_buf) return -1;
     REPORTLN("* patch #1 (crash_dump64 ← splicehelper, %zu bytes)", sh_len_padded);
     int ret = patch_file_cbc(kCrashDump, sh_buf, sh_len_padded, 0, 0, reporter);
+    if (ret) { free(sh_buf); REPORTLN("patch #1 failed: %d", ret); return ret; }
+
+    // Verify patch #1 actually landed in the page cache.
+    {
+        uint8_t verify[16];
+        int vfd = open(kCrashDump, O_RDONLY);
+        if (vfd >= 0) {
+            ssize_t n = pread(vfd, verify, 16, 16);
+            close(vfd);
+            if (n == 16 && memcmp(verify, sh_buf + 16, 16) != 0) {
+                REPORTLN("patch #1 verify FAILED: page cache not modified (known issue on android14-6.1)");
+                free(sh_buf);
+                return -1;
+            }
+            REPORTLN("patch #1 verify OK");
+        }
+    }
     free(sh_buf);
-    if (ret) { REPORTLN("patch #1 failed: %d", ret); return ret; }
 
     size_t ko_len_padded;
     char *ko_buf = pad16(ko->start, (size_t)(ko->end - ko->start), &ko_len_padded);

@@ -1,92 +1,104 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
-#include <linux/module.h>
-#include <linux/kprobes.h>
 #include <linux/kmod.h>
-#include <linux/slab.h>
-
-typedef unsigned long (*kallsyms_lookup_name_t)(const char *name);
-typedef void *(*umh_setup_t)(const char *path, char **argv, char **envp, gfp_t gfp,
-			     void *init, void *cleanup, void *data);
-typedef int (*umh_exec_t)(void *info, int wait);
+#include <linux/kprobes.h>
+#include <linux/module.h>
+#include <linux/ptrace.h>
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("DFRoot LKM");
 
+typedef unsigned long (*kallsyms_lookup_name_t)(const char *name);
+typedef void *(*umh_setup_t)(const char *path, char **argv, char **envp, gfp_t gfp,
+                             void *init, void *cleanup, void *data);
+typedef int (*umh_exec_t)(void *info, int wait);
+
 static int soft_reboot;
 module_param(soft_reboot, int, 0);
 
-static unsigned long kprobes_lookup(const char *name) {
-	struct kprobe kp = { .symbol_name = name };
-	unsigned long addr;
-	if (register_kprobe(&kp) < 0) return 0;
-	addr = (unsigned long)kp.addr;
-	unregister_kprobe(&kp);
-	return addr;
+static int defex_pre_handler(struct kprobe *p, struct pt_regs *regs)
+{
+    (void)p;
+    regs->regs[0] = 0;         /* x0 = DEFEX_ALLOW */
+    regs->pc = regs->regs[30]; /* skip body: return to caller */
+    return 1;
 }
 
-static int defex_pre_handler(struct kprobe *p, struct pt_regs *regs) {
-	regs->regs[0] = 0;
-	regs->pc = regs->regs[30];
-	return 1;
+static int __nocfi __init dirtyfrag_init(void)
+{
+    kallsyms_lookup_name_t get_addr;
+    umh_setup_t umh_setup;
+    umh_exec_t  umh_exec;
+    bool *selinux_state;
+    struct kprobe kln_kp;
+    struct kprobe defex_kp;
+    struct kprobe umh_kp;
+    void *info;
+    int ret;
+
+    static const char sh[]   = "/system/bin/sh";
+    static const char ksud[] = "/data/user_de/0/df.root/ksud";
+    static char cmd[256];
+    static char *envp[] = { "PATH=/system/bin", NULL };
+    static char *argv[] = { (char *)sh, "-c", cmd, NULL };
+    snprintf(cmd, sizeof(cmd),
+             "%s late-load --package-name me.weishu.kernelsu --ro-partitions%s"
+             " && touch /dev/dfm0 || touch /dev/dfm1",
+             ksud, soft_reboot ? " --soft-reboot" : "");
+
+    kln_kp = (struct kprobe){ .symbol_name = "kallsyms_lookup_name" };
+    if (register_kprobe(&kln_kp) < 0) {
+        pr_err("dfroot: kallsyms_lookup_name not found\n");
+        return -EINVAL;
+    }
+    get_addr = (kallsyms_lookup_name_t)kln_kp.addr;
+    unregister_kprobe(&kln_kp);
+
+    selinux_state = (bool *)get_addr("selinux_state");
+    if (!selinux_state) {
+        pr_err("dfroot: selinux_state not found\n");
+        return -EINVAL;
+    }
+    WRITE_ONCE(*selinux_state, false);
+    pr_info("dfroot: selinux_state permissive\n");
+
+    defex_kp = (struct kprobe){ .addr = (kprobe_opcode_t *)get_addr("task_defex_enforce"),
+                                .pre_handler = defex_pre_handler };
+    if (register_kprobe(&defex_kp) < 0)
+        pr_err("dfroot: task_defex_enforce not found\n");
+    else
+        pr_info("dfroot: task_defex_enforce hooked\n");
+
+    umh_kp = (struct kprobe){ .addr = (kprobe_opcode_t *)get_addr("task_defex_user_exec"),
+                              .pre_handler = defex_pre_handler };
+    if (register_kprobe(&umh_kp) < 0)
+        pr_err("dfroot: task_defex_user_exec not found\n");
+    else
+        pr_info("dfroot: task_defex_user_exec hooked\n");
+
+    umh_setup = (umh_setup_t)get_addr("call_usermodehelper_setup");
+    umh_exec  = (umh_exec_t)get_addr("call_usermodehelper_exec");
+    if (!umh_setup || !umh_exec) {
+        pr_err("dfroot: usermodehelper symbols missing (setup=%px exec=%px)\n",
+               umh_setup, umh_exec);
+        return -EINVAL;
+    }
+
+    info = umh_setup(sh, argv, envp, GFP_KERNEL, NULL, NULL, NULL);
+    if (!info) {
+        pr_err("dfroot: usermodehelper_setup: returned NULL\n");
+        return -EINVAL;
+    }
+    /* bypass CONFIG_STATIC_USERMODEHELPER_PATH="" overriding path to "" */
+    ((struct subprocess_info *)info)->path = sh;
+
+    ret = umh_exec(info, UMH_WAIT_PROC);
+    pr_info("dfroot: usermodehelper_exec(%s) returned %d\n", ksud, ret);
+
+    if (defex_kp.addr) unregister_kprobe(&defex_kp);
+    if (umh_kp.addr)   unregister_kprobe(&umh_kp);
+    return -E2BIG; /* return any error to unload module */
 }
 
-static struct kprobe kp_user_exec = { .symbol_name = "task_defex_user_exec", .pre_handler = defex_pre_handler };
-static struct kprobe kp_dc_path   = { .symbol_name = "get_dc_target_dpath",  .pre_handler = defex_pre_handler };
-
-static int __nocfi __init dirtyfrag_init(void) {
-	kallsyms_lookup_name_t kln;
-	umh_setup_t umh_setup;
-	umh_exec_t  umh_exec;
-	unsigned long selinux;
-
-	kln = (kallsyms_lookup_name_t)kprobes_lookup("kallsyms_lookup_name");
-	if (!kln) return -EINVAL;
-
-	selinux = kln("selinux_state");
-	if (!selinux) return -EINVAL;
-	WRITE_ONCE(*(bool *)selinux, false);
-	pr_info("dfroot: selinux permissive\n");
-
-	umh_setup = (umh_setup_t)kln("call_usermodehelper_setup");
-	umh_exec  = (umh_exec_t)kln("call_usermodehelper_exec");
-
-	if (umh_setup && umh_exec) {
-		static const char sh[]   = "/system/bin/sh";
-		static char cmd[256];
-		static char *envp[] = { "HOME=/", "PATH=/sbin:/vendor/bin:/system/bin", NULL };
-		static char *argv[] = { (char *)sh, "-c", cmd, NULL };
-		void *info;
-
-		snprintf(cmd, sizeof(cmd),
-			 "%s late-load --package-name me.weishu.kernelsu --ro-partitions%s"
-			 " && touch /dev/dfm0 || touch /dev/dfm1",
-			 "/data/user_de/0/df.root/ksud", soft_reboot ? " --soft-reboot" : "");
-
-		info = umh_setup(sh, argv, envp, GFP_KERNEL, NULL, NULL, NULL);
-		if (info) {
-			struct subprocess_info *si = (struct subprocess_info *)info;
-			int ret;
-			si->path = sh;
-			register_kprobe(&kp_user_exec);
-			register_kprobe(&kp_dc_path);
-			ret = umh_exec(info, UMH_WAIT_PROC);
-			if (kp_user_exec.addr) unregister_kprobe(&kp_user_exec);
-			if (kp_dc_path.addr)   unregister_kprobe(&kp_dc_path);
-			if (ret)
-				pr_err("dfroot: umh_exec failed: %d\n", ret);
-			else
-				pr_info("dfroot: umh_exec ok\n");
-		} else {
-			pr_err("dfroot: umh_setup returned NULL\n");
-		}
-	} else {
-		pr_err("dfroot: umh symbols missing (setup=%px exec=%px)\n", umh_setup, umh_exec);
-	}
-
-	/* Return random error to unload module. */
-	return -E2BIG;
-}
-
-/* No module_exit: we never unload; saves .exit sections. */
+/* no module_exit: we never unload; saves .exit sections */
 module_init(dirtyfrag_init);
