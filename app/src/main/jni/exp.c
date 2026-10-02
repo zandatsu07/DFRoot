@@ -316,8 +316,6 @@ asm(
     "dirtyfrag_ko_13_5_15_start:\n.incbin \"ko/dirtyfrag-android13-5.15.ko\"\ndirtyfrag_ko_13_5_15_end:\n"
     ".global dirtyfrag_ko_14_5_15_start\n.global dirtyfrag_ko_14_5_15_end\n"
     "dirtyfrag_ko_14_5_15_start:\n.incbin \"ko/dirtyfrag-android14-5.15.ko\"\ndirtyfrag_ko_14_5_15_end:\n"
-    ".global dirtyfrag_ko_14_6_1_start\n.global dirtyfrag_ko_14_6_1_end\n"
-    "dirtyfrag_ko_14_6_1_start:\n.incbin \"ko/dirtyfrag-android14-6.1.ko\"\ndirtyfrag_ko_14_6_1_end:\n"
     ".global dirtyfrag_ko_15_6_6_start\n.global dirtyfrag_ko_15_6_6_end\n"
     "dirtyfrag_ko_15_6_6_start:\n.incbin \"ko/dirtyfrag-android15-6.6.ko\"\ndirtyfrag_ko_15_6_6_end:\n"
     ".global dirtyfrag_ko_16_6_12_start\n.global dirtyfrag_ko_16_6_12_end\n"
@@ -336,7 +334,6 @@ extern char dirtyfrag_ko_12_5_10_start[], dirtyfrag_ko_12_5_10_end[];
 extern char dirtyfrag_ko_13_5_10_start[], dirtyfrag_ko_13_5_10_end[];
 extern char dirtyfrag_ko_13_5_15_start[], dirtyfrag_ko_13_5_15_end[];
 extern char dirtyfrag_ko_14_5_15_start[], dirtyfrag_ko_14_5_15_end[];
-extern char dirtyfrag_ko_14_6_1_start[],  dirtyfrag_ko_14_6_1_end[];
 extern char dirtyfrag_ko_15_6_6_start[],  dirtyfrag_ko_15_6_6_end[];
 extern char dirtyfrag_ko_16_6_12_start[], dirtyfrag_ko_16_6_12_end[];
 extern char dirtyfrag_ko_17_6_18_start[], dirtyfrag_ko_17_6_18_end[];
@@ -350,7 +347,6 @@ static const struct KoImage *select_ko_image(int andr, int major, int minor) {
         {13, 5, 10, dirtyfrag_ko_13_5_10_start, dirtyfrag_ko_13_5_10_end},
         {13, 5, 15, dirtyfrag_ko_13_5_15_start, dirtyfrag_ko_13_5_15_end},
         {14, 5, 15, dirtyfrag_ko_14_5_15_start, dirtyfrag_ko_14_5_15_end},
-        {14, 6,  1, dirtyfrag_ko_14_6_1_start,  dirtyfrag_ko_14_6_1_end},
         {15, 6,  6, dirtyfrag_ko_15_6_6_start,  dirtyfrag_ko_15_6_6_end},
         {16, 6, 12, dirtyfrag_ko_16_6_12_start, dirtyfrag_ko_16_6_12_end},
         {17, 6, 18, dirtyfrag_ko_17_6_18_start, dirtyfrag_ko_17_6_18_end},
@@ -420,7 +416,7 @@ static int patch_ko(struct Reporter *reporter) {
             ssize_t n = pread(vfd, verify, 16, 16);
             close(vfd);
             if (n == 16 && memcmp(verify, sh_buf + 16, 16) != 0) {
-                REPORTLN("patch #1 verify FAILED: page cache not modified (known issue on android14-6.1)");
+                REPORTLN("patch #1 verify FAILED: page cache not modified");
                 free(sh_buf);
                 return -1;
             }
